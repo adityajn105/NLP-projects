@@ -11,7 +11,7 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 
 from tensorflow.keras.layers import Input, Embedding, Bidirectional, LSTM
 from tensorflow.keras.layers import RepeatVector, Concatenate, Dense, Dot
-from tensorflow.keras.layers import Lambda
+from tensorflow.keras.layers import Lambda, Dropout
 
 from tensorflow.keras import backend as K
 
@@ -118,7 +118,7 @@ encoder_inp = Input( shape=(MAX_ENCODER_SIZE,) ) #(_,Tx)
 encoder_embedding = Embedding( ENCODER_VOCAB_SIZE, ENCODER_EMBEDDING_DIM, weights=[embedding_matrix], trainable=False )
 embeddings_en = encoder_embedding( encoder_inp ) #(_,Tx, ENCODER_EMBEDDING_DIM)
 
-encoder_bilstm = Bidirectional( LSTM( LATENT_DIM_EN, return_sequences=True, recurrent_dropout=0.1 ) )
+encoder_bilstm = Bidirectional( LSTM( LATENT_DIM_EN, return_sequences=True, dropout=0.1, recurrent_dropout=0.1 ) )
 hidden_states = encoder_bilstm( embeddings_en ) #(_,Tx, 2*M1)
 
 #Attention Part
@@ -129,7 +129,7 @@ hidden_states = encoder_bilstm( embeddings_en ) #(_,Tx, 2*M1)
 #get weigher hidden states (when we multiple alpha with hidden state)
 #sum all weighted hidden state this is context
 #last 2 steps can be achieved by dot product over axis=1
-def softmax_over_time(x): #(softmax on time axis (axis=1) instead of axis=-1)
+def softmax_over_time(x): #(softmax on time axis instead of axis=-1)
   e = K.exp( x - K.max(x, axis=1, keepdims=True) )
   s = K.sum(e, axis=1, keepdims=True)
   return e/s
@@ -137,16 +137,18 @@ def softmax_over_time(x): #(softmax on time axis (axis=1) instead of axis=-1)
 attn_repeatvector = RepeatVector(Tx) #to repeat previous decoder-state s(t-1) over Tx times
 attn_concatenate = Concatenate(axis=-1) #to concatenate s(t-1) with every encoder hidden_state
 attn_dense = Dense( 10, activation="tanh" ) #a dense layer
+attn_dropout = Dropout(0.1)
 attn_alpha = Dense( 1, activation=softmax_over_time ) #to get importance of each hidden state
-attn_context = Dot(axes=1) # weighted(importnace) sum of all hidden states = \sum (h_i.alpha_i)
+attn_context = Dot(axes=1) # weighted(importnace) sum of each unit of all hiddenstate
 
 def one_step_attention( h_states, s_prev ):
   x = attn_repeatvector( s_prev ) #(_,Tx, M2)
   x = attn_concatenate( [ h_states, x ] ) #(_,Tx, 2*M1+M2)
   x = attn_dense(x) #(_,Tx, 10)
-  alpha = attn_alpha(x) #(_,Tx, 1)
-  context = attn_context([alpha, h_states]) #(_,1,2*M1)
-  return context, alpha
+  x = attn_dropout(x)
+  alphas = attn_alpha(x) #(_,Tx, 1)
+  context = attn_context([alphas, h_states]) #(_,1,2*M1)
+  return context, alphas
 
 
 #Decoder Part
@@ -169,10 +171,12 @@ embeddings_de = decoder_embedding(decoder_inp) #_,Ty, 50
 concat_context_word_prev = Concatenate(axis=-1, name="word_context_concat")
 decoder_lstm = LSTM( LATENT_DIM_DE, return_state=True, name="decoder_lstm", recurrent_dropout=0.1 )
 dense_context = Dense(100, activation='tanh', name="decoder_context")
+dropout_context = Dropout(0.1)
 dense_decoder = Dense( DECODER_VOCAB_SIZE, activation='softmax', name="decoder_dense") 
 
 s = initial_decoder_h #(_,M2)
 c = initial_decoder_c #(_,M2)
+
 outputs = [] #to save each decoding timestep output
 for t in range(Ty):
   context, _ = one_step_attention( hidden_states, s ) #(_,1, 2*M1)
@@ -181,16 +185,19 @@ for t in range(Ty):
   word_embedding = selector(embeddings_de ) #(_,1, 50)
   context_word = concat_context_word_prev([context,word_embedding]) #(_,1, 2*M1+50)
   context_word = dense_context( context_word ) #(_,1, 100)
+  context_droput = dropout_context(context_word) #(_,1, 100)
 
-  output, s, c = decoder_lstm( context_word, initial_state=[s,c] ) #(_,1,M2), (_,M2), (_,M2)
-  output = dense_decoder(output) #(_, DECODER_VOCAB_SIZE)
+  output, s, c = decoder_lstm( context_droput, initial_state=[s,c] ) #(_,1,M2), (_,M2), (_,M2)
+  output = dense_decoder(output) #(_,1, DECODER_VOCAB_SIZE)
   outputs.append(output) # after loop it will be a list of length Ty (_ , DEOCDER_VOCAB_SIZE)
+
 
 # to change outputs shape to (_, Ty, DEOCDER_VOCAB_SIZE)
 def stack_and_transpose(x):
   x = K.stack(x) # it will convert list to a tensor of ( Ty, _, DEOCDER_VOCAB_SIZE )
   x = K.permute_dimensions( x, pattern=(1,0,2) ) #(_, Ty, DEOCDER_VOCAB_SIZE)
   return x
+
 stacker = Lambda(stack_and_transpose, name="stack_and_transpose")
 outputs = stacker(outputs) #(_, Ty, DEOCDER_VOCAB_SIZE)
 
@@ -273,8 +280,8 @@ ax[0].plot( range(epochs), list(map(lambda x: x[2], all_metrics)), label="Val Lo
 ax[0].legend();ax[0].set_xlabel('Epochs');ax[0].set_ylabel('Loss');ax[0].grid()
 ax[0].set_title("Model training and Validation Loss curves")
 
-ax[1].plot( range(epochs), list(map(lambda x: x[1], all_metrics)), label="Train AUC" )
-ax[1].plot( range(epochs), list(map(lambda x: x[3], all_metrics)), label="Val AUC" )
+ax[1].plot( range(epochs), list(map(lambda x: x[1], all_metrics)), label="Train Accuracy" )
+ax[1].plot( range(epochs), list(map(lambda x: x[3], all_metrics)), label="Val Accuracy" )
 ax[1].legend();ax[1].set_xlabel('Epochs');ax[1].set_ylabel('Accuracy');ax[1].grid()
 ax[1].set_title("Model Training and Validation Accuracy Curves")
 plt.show()
@@ -298,14 +305,11 @@ s, c = initial_decoder_h, initial_decoder_c
 
 token_new = token
 next_token = Lambda( lambda x: K.expand_dims(K.argmax(x,axis=-1), axis=-1), name="next_token")
-
 outputs = []
 alphas = []
 for _ in range(Ty):
-  context  = one_step_attention( hidden_states, s ) #(_,1, 2*M1)
-
-  alpha = getalpha( hidden_states, s ) #(_, Tx, 1)
-
+  context, alpha  = one_step_attention( hidden_states, s ) #(_,1, 2*M1), (_, Tx, 1)
+  
   context_word = concat_context_word_prev([ context, word_embedding ])
   context_word = dense_context( context_word ) #(_,1, 100)
 
@@ -317,6 +321,14 @@ for _ in range(Ty):
 
   outputs.append(output) # after loop it will be a list of length Ty (_ , DEOCDER_VOCAB_SIZE) 
   alphas.append(alpha) #after loop it will be a list of length Ty (_, Tx, 1 )
+
+def stack_alphas( x ):
+  x = K.stack(x)
+  return K.permute_dimensions( x, pattern=(1,2,0,3) )
+
+alphas = Lambda( stack_alphas )(alphas)
+outputs = stacker(outputs)
+translator = Model( [ encoder_inp, token, initial_decoder_h, initial_decoder_c ], [outputs, alphas] )
 
 def stack_alphas( x ):
   x = K.stack(x)
@@ -338,9 +350,11 @@ def giveTranslatewithattn( sentence ):
   outputs, alphas = translator( [ enc_inp, init_token, initial_h, initial_c ] )
   outputs = np.argmax( outputs, axis=-1 )
   outputs = [ idx2word_decoder[ idx ] for idx in outputs[0] ]
+  
   attn = pd.DataFrame( np.reshape(alphas, (Tx,Ty)),
-                      index = [ idx2word_encoder[idx] for idx in enc_inp ], 
+                      index = [ idx2word_encoder[idx] for idx in enc_inp[0] ], 
                       columns = outputs )
+  
   outputs = [ w for w in outputs if w not in ('<pad>','<eos>') ]
   return " ".join(inputs), " ".join(outputs), attn
 
