@@ -13,5 +13,8 @@ NLP related projects for quick reference and revision.
 5. Poem Generator
 
 ## Seq2Seq with Encoder-Decoder
-6. Seq2Seq (English to Spanish)
-7. Seq2Seq with Attention (English to Spanish)
+6. Seq2Seq (English to Spanish) 
+7. Seq2Seq with Attention (English to Spanish) [Nice Article (Must Read) ](https://jalammar.github.io/visualizing-neural-machine-translation-mechanics-of-seq2seq-models-with-attention/)
+
+## Seq2Seq using Transformer
+8. Seq2Seq using tensor2tensor []()
